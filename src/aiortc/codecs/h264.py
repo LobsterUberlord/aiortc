@@ -104,7 +104,10 @@ class H264PayloadDescriptor:
 
 class H264Decoder(Decoder):
     def __init__(self) -> None:
-        self.codec = av.CodecContext.create("h264", "r")
+        hwaccel = {'device_type_name': 'cuda'}
+        self.codec = av.CodecContext.create("h264", "r", hwaccel=dict(hwaccel))
+        #self.codec = av.CodecContext.create("h264", "r")
+        logger.info("CUDA h264 decoder enabled? " + str(self.codec.using_hwaccel))
 
     def decode(self, encoded_frame: JitterFrame) -> List[Frame]:
         try:
@@ -124,7 +127,10 @@ class H264Decoder(Decoder):
 def create_encoder_context(
     codec_name: str, width: int, height: int, bitrate: int
 ) -> Tuple[av.CodecContext, bool]:
-    codec = av.CodecContext.create(codec_name, "w")
+    hwaccel = {'device_type_name': 'cuda'}
+    codec = av.CodecContext.create(codec_name, "w", hwaccel=dict(hwaccel))
+    #codec = av.CodecContext.create(codec_name, "w")
+    logger.info("CUDA h264 encoder enabled? "  + str(codec.using_hwaccel))
     codec.width = width
     codec.height = height
     codec.bit_rate = bitrate
