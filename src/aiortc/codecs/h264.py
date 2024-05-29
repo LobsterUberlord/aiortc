@@ -322,6 +322,7 @@ class H264Encoder(Encoder):
                         frame.height,
                         bitrate=self.target_bitrate,
                     )
+            logger.info("Encoding with " + self.codec.name)
 
         data_to_send = b""
         for package in self.codec.encode(frame):
