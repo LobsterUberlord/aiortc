@@ -127,23 +127,34 @@ class H264Decoder(Decoder):
 def create_encoder_context(
     codec_name: str, width: int, height: int, bitrate: int
 ) -> Tuple[av.CodecContext, bool]:
-    hwaccel = {'device_type_name': 'cuda'}
-    codec = av.CodecContext.create(codec_name, "w", hwaccel=dict(hwaccel))
-    #codec = av.CodecContext.create(codec_name, "w")
-    logger.info("CUDA h264 encoder enabled? "  + str(codec.using_hwaccel))
+    hwaccel = None
+    if codec_name == "h264_nvenc":
+        hwaccel = dict({'device_type_name': 'cuda'})
+    codec = av.CodecContext.create(codec_name, "w", hwaccel=hwaccel)
     codec.width = width
     codec.height = height
     codec.bit_rate = bitrate
     codec.pix_fmt = "yuv420p"
     codec.framerate = fractions.Fraction(MAX_FRAME_RATE, 1)
     codec.time_base = fractions.Fraction(1, MAX_FRAME_RATE)
-    codec.options = {
-        "profile": "baseline",
-        "level": "31",
-        "tune": "zerolatency",  # does nothing using h264_omx
-    }
+
+    if codec_name == "h264_nvenc":
+        codec.options = {
+            "preset": "p3",
+            "tune": "ull",
+            "profile": "baseline",
+        }
+    else: #libx264/h264_omx
+        codec.options = {
+            "profile": "baseline",
+            "level": "31",
+            "tune": "zerolatency",  # does nothing using h264_omx
+        }
+    
+    codec_buffering = codec_name == "h264_omx"
+    
     codec.open()
-    return codec, codec_name == "h264_omx"
+    return codec, codec_buffering
 
 
 class H264Encoder(Encoder):
@@ -295,15 +306,22 @@ class H264Encoder(Encoder):
         if self.codec is None:
             try:
                 self.codec, self.codec_buffering = create_encoder_context(
-                    "h264_omx", frame.width, frame.height, bitrate=self.target_bitrate
+                    "h264_nvenc", frame.width, frame.height, bitrate=self.target_bitrate
                 )
             except Exception:
-                self.codec, self.codec_buffering = create_encoder_context(
-                    "libx264",
-                    frame.width,
-                    frame.height,
-                    bitrate=self.target_bitrate,
-                )
+                logger.warning("h264_nvenc codec unavailable") # TODO: make this debug log
+            
+                try:
+                    self.codec, self.codec_buffering = create_encoder_context(
+                        "h264_omx", frame.width, frame.height, bitrate=self.target_bitrate
+                    )
+                except Exception:
+                    self.codec, self.codec_buffering = create_encoder_context(
+                        "libx264",
+                        frame.width,
+                        frame.height,
+                        bitrate=self.target_bitrate,
+                    )
 
         data_to_send = b""
         for package in self.codec.encode(frame):
