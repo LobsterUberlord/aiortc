@@ -5,6 +5,8 @@ from itertools import tee
 from struct import pack, unpack_from
 from typing import Iterator, List, Optional, Sequence, Tuple, Type, TypeVar
 
+import PyNvVideoCodec as nvc
+
 import av
 from av.frame import Frame
 from av.packet import Packet
@@ -12,6 +14,11 @@ from av.packet import Packet
 from ..jitterbuffer import JitterFrame
 from ..mediastreams import VIDEO_TIME_BASE, convert_timebase
 from .base import Decoder, Encoder
+
+import ctypes
+import nvcv
+import cvcuda
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -104,25 +111,63 @@ class H264PayloadDescriptor:
 
 class H264Decoder(Decoder):
     def __init__(self) -> None:
-        hwaccel = {'device_type_name': 'cuda'}
-        self.codec = av.CodecContext.create("h264", "r", hwaccel=dict(hwaccel))
-        #self.codec = av.CodecContext.create("h264", "r")
-        logger.info("CUDA h264 decoder enabled? " + str(self.codec.using_hwaccel))
+        self.nv_dec = nvc.CreateDecoder(codec=nvc.cudaVideoCodec.H264, usedevicememory=True, enableasyncallocations=False)
+        self.cvcuda_rgb24_tensor = None
+        self.torch_rgb24_tensor = None
+        self.packet = nvc.PacketData()
+        self.packet_c_bytes = None
 
     def decode(self, encoded_frame: JitterFrame) -> List[Frame]:
+        frames = []
         try:
-            packet = av.Packet(encoded_frame.data)
-            packet.pts = encoded_frame.timestamp
-            packet.time_base = VIDEO_TIME_BASE
-            frames = self.codec.decode(packet)
-        except av.AVError as e:
+            if (self.packet_c_bytes is None) or (len(encoded_frame.data) > len(self.packet_c_bytes)):
+                self.packet_c_bytes = (ctypes.c_byte * len(encoded_frame.data)).from_buffer_copy(encoded_frame.data)
+            else:
+                ctypes.memmove(ctypes.addressof(self.packet_c_bytes), encoded_frame.data, len(encoded_frame.data))
+            
+            self.packet.bsl_data = ctypes.cast(self.packet_c_bytes, ctypes.c_void_p).value
+            self.packet.bsl = len(encoded_frame.data)
+
+            for decoded_frame in self.nv_dec.Decode(self.packet):
+                cvcuda_yuv_tensor = nvcv.as_tensor(
+                    nvcv.as_image(decoded_frame.nvcv_image(), nvcv.Format.U8)
+                )
+                if cvcuda_yuv_tensor.layout == "NCHW":
+                    cvcuda_yuv_tensor = cvcuda.reformat(cvcuda_yuv_tensor, "NHWC")
+                
+                # TODO: should reallocate this tensor if the width/height changes
+                if self.cvcuda_rgb24_tensor is None:
+                    width = self.nv_dec.GetWidth()
+                    height = self.nv_dec.GetHeight()
+                    print("nv_dec width", width)
+                    print("nv_dec height", height)
+                    self.cvcuda_rgb24_tensor = cvcuda.Tensor(
+                        (1, height, width, 3),
+                        nvcv.Type.U8,
+                        nvcv.TensorLayout.NHWC,
+                    )
+                
+                # convert YUV->RGB on GPU
+                # NOTE: probably don't really need to do this conversion,
+                # but av.VideoFrame.from_ndarray expects an nv12 tensor to have a different
+                # shape than cvcuda_yuv_tensor has, and nv12 is a bit of an odd duck anyway,
+                # so it's just easier to create an rgb24 tensor!
+                cvcuda.cvtcolor_into(self.cvcuda_rgb24_tensor, cvcuda_yuv_tensor, cvcuda.ColorConversion.YUV2RGB_NV12)
+                # copy to CPU and convert NHWC -> HWC
+                if self.torch_rgb24_tensor is None:
+                    self.torch_rgb24_tensor = torch.as_tensor(self.cvcuda_rgb24_tensor.cuda()).squeeze(0).cpu()
+                else:
+                    self.torch_rgb24_tensor.copy_(torch.as_tensor(self.cvcuda_rgb24_tensor.cuda()).squeeze(0))
+                frame = av.VideoFrame.from_ndarray(self.torch_rgb24_tensor.numpy(), "rgb24")
+                frame.pts = encoded_frame.timestamp
+                frame.time_base = VIDEO_TIME_BASE
+                frames.append(frame)
+        except Exception as e:
             logger.warning(
                 "H264Decoder() failed to decode, skipping package: " + str(e)
             )
-            return []
 
         return frames
-
 
 def create_encoder_context(
     codec_name: str, width: int, height: int, bitrate: int
