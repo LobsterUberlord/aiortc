@@ -1,3 +1,5 @@
+import os
+
 from typing import Dict, List, Optional, Union
 
 from ..rtcrtpparameters import (
@@ -14,6 +16,8 @@ from .g711 import PcmaDecoder, PcmaEncoder, PcmuDecoder, PcmuEncoder
 from .h264 import H264Decoder, H264Encoder, h264_depayload
 from .opus import OpusDecoder, OpusEncoder
 from .vpx import Vp8Decoder, Vp8Encoder, vp8_depayload
+
+ENABLE_CUDA_H264 = os.getenv('ENABLE_AIORTC_CUDA_H264') == '1'
 
 PCMU_CODEC = RTCRtpCodecParameters(
     mimeType="audio/PCMU", clockRate=8000, channels=1, payloadType=0
@@ -148,7 +152,11 @@ def get_decoder(codec: RTCRtpCodecParameters) -> Decoder:
     elif mimeType == "audio/pcmu":
         return PcmuDecoder()
     elif mimeType == "video/h264":
-        return H264Decoder()
+        if ENABLE_CUDA_H264:
+            from .cuda_h264 import CudaH264Decoder
+            return CudaH264Decoder()
+        else:
+            return H264Decoder()
     elif mimeType == "video/vp8":
         return Vp8Decoder()
     else:
